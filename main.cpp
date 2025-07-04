@@ -1,931 +1,322 @@
-﻿#include <SFML/Graphics.hpp>
+﻿#include "GanttChart.h"
 #include <iostream>
-#include <vector>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <map>
-#include <algorithm>
-#include <cmath>
-#include <iomanip>
-#include <cctype>
+#include <thread>
 #include <chrono>
 
-// ========== 调试开关配置 ==========
-// 修改这些宏的值来控制调试输出
-// 1 = 开启, 0 = 关闭
-
-#if 0
-#define ENABLE_CSV_DEBUG        // CSV读取调试信息
-#endif
-
-#if 0
-#define ENABLE_DATA_ANALYSIS    // 数据分析和重叠检测
-#endif
-
-#if 0
-#define ENABLE_DRAWING_DEBUG    // 绘制过程调试信息
-#endif
-
-#if 1
-#define ENABLE_RANGE_DEBUG      // 范围计算调试信息
-#endif
-
-#if 0
-#define ENABLE_PERFORMANCE_DEBUG // 性能调试信息
-#endif
-
-// ========== 调试宏定义 ==========
-#ifdef ENABLE_CSV_DEBUG
-#define CSV_DEBUG(x) do { std::cout << "[CSV] " << x << std::endl; } while(0)
-#define CSV_DEBUG_DETAILED(x) do { std::cout << "[CSV_DETAIL] " << x << std::endl; } while(0)
-#else
-#define CSV_DEBUG(x) do {} while(0)
-#define CSV_DEBUG_DETAILED(x) do {} while(0)
-#endif
-
-#ifdef ENABLE_DATA_ANALYSIS
-#define DATA_DEBUG(x) do { std::cout << "[DATA] " << x << std::endl; } while(0)
-#define OVERLAP_DEBUG(x) do { std::cout << "[OVERLAP] " << x << std::endl; } while(0)
-#else
-#define DATA_DEBUG(x) do {} while(0)
-#define OVERLAP_DEBUG(x) do {} while(0)
-#endif
-
-#ifdef ENABLE_DRAWING_DEBUG
-#define DRAW_DEBUG(x) do { std::cout << "[DRAW] " << x << std::endl; } while(0)
-#else
-#define DRAW_DEBUG(x) do {} while(0)
-#endif
-
-#ifdef ENABLE_RANGE_DEBUG
-#define RANGE_DEBUG(x) do { std::cout << "[RANGE] " << x << std::endl; } while(0)
-#else
-#define RANGE_DEBUG(x) do {} while(0)
-#endif
-
-#ifdef ENABLE_PERFORMANCE_DEBUG
-#define PERF_DEBUG(x) do { std::cout << "[PERF] " << x << std::endl; } while(0)
-#else
-#define PERF_DEBUG(x) do {} while(0)
-#endif
-
-// 通用调试宏
-#define INFO(x) do { std::cout << "[INFO] " << x << std::endl; } while(0)
-#define ERROR(x) do { std::cerr << "[ERROR] " << x << std::endl; } while(0)
-#define WARNING(x) do { std::cout << "[WARNING] " << x << std::endl; } while(0)
-
-// 定义操作结构体
-struct MyOp {
-    int job_id;
-    int stage;
-    int machine_id;
-    int start_time;
-    int end_time;
-    bool is_critical;
-    double some_other_field;
-};
-
-// 甘特图绘制类
-class GanttChart {
-private:
-    sf::RenderWindow& window;
-    sf::Font font;
-    std::vector<MyOp> operations;
-    std::map<int, sf::Color> jobColors;
-    bool debugOutputShown = false;  // 添加标志，避免重复输出调试信息
-
-    // 图表参数 - 针对大数据集优化
-    float leftMargin = 60.0f;
-    float topMargin = 30.0f;
-    float bottomMargin = 60.0f;
-    float rightMargin = 30.0f;
-    float barHeight = 25.0f;      // 减小条高度以容纳更多机器
-    float barSpacing = 2.0f;      // 减小间距
-
-    // 时间和机器范围
-    int minTime, maxTime;
-    int minMachine, maxMachine;
-    float timeScale;
-
-    // 缩放和平移参数
-    float zoomLevel = 1.0f;
-    float offsetX = 0.0f;
-    float offsetY = 0.0f;
-
-public:
-    GanttChart(sf::RenderWindow& win) : window(win) {
-        // 尝试加载字体
-        if (!font.loadFromFile("arial.ttf")) {
-            // 如果加载失败，使用默认字体
-            std::cout << "Warning: Could not load font file. Using default font." << std::endl;
-        }
-    }
-
-    // 直接设置数据（用于测试）
-    void setData(const std::vector<MyOp>& ops) {
-        operations = ops;
-        calculateRanges();
-        generateJobColors();
-        DATA_DEBUG("=== Test Data Loaded ===");
-        printLoadedData();
-    }
-
-    // 打印已加载的数据进行验证
-    void printLoadedData() {
-#ifdef ENABLE_DATA_ANALYSIS
-        std::cout << "[DATA] === Loaded Operations Data ===" << std::endl;
-        std::cout << "[DATA] Format: [Index] Job-Stage | Machine | Time | Critical | Other" << std::endl;
-        std::cout << "[DATA] ---------------------------------------------------------------" << std::endl;
-
-        for (size_t i = 0; i < operations.size(); ++i) {
-            const auto& op = operations[i];
-            std::cout << "[DATA] [" << std::setw(2) << i << "] "
-                << "J" << op.job_id << "-" << op.stage << " | "
-                << "M" << op.machine_id << " | "
-                << "[" << std::setw(2) << op.start_time << "-" << std::setw(2) << op.end_time << "] | "
-                << (op.is_critical ? "CRITICAL" : "normal  ") << " | "
-                << op.some_other_field << std::endl;
-        }
-
-        std::cout << "[DATA] === Range Analysis ===" << std::endl;
-        std::cout << "[DATA] Time range: " << minTime << " - " << maxTime << " (duration: " << (maxTime - minTime) << ")" << std::endl;
-        std::cout << "[DATA] Machine range: " << minMachine << " - " << maxMachine << " (count: " << (maxMachine - minMachine + 1) << ")" << std::endl;
-        std::cout << "[DATA] Time scale: " << timeScale << " pixels per time unit" << std::endl;
-
-        // 检查重叠问题
-        checkOverlaps();
-
-        std::cout << "[DATA] === Job Colors ===" << std::endl;
-        for (const auto& pair : jobColors) {
-            std::cout << "[DATA] Job " << pair.first << ": RGB("
-                << static_cast<int>(pair.second.r) << ", "
-                << static_cast<int>(pair.second.g) << ", "
-                << static_cast<int>(pair.second.b) << ")" << std::endl;
-        }
-#endif
-    }
-
-    // 检查数据中的重叠问题
-    void checkOverlaps() {
-        OVERLAP_DEBUG("=== Overlap Analysis ===");
-
-        // 按机器分组检查重叠
-        std::map<int, std::vector<MyOp>> machineOps;
-        for (const auto& op : operations) {
-            machineOps[op.machine_id].push_back(op);
-        }
-
-        bool hasOverlaps = false;
-
-#ifdef ENABLE_DATA_ANALYSIS
-        for (auto& pair : machineOps) {
-            int machineId = pair.first;
-            auto& ops = pair.second;
-
-            // 按开始时间排序
-            std::sort(ops.begin(), ops.end(), [](const MyOp& a, const MyOp& b) {
-                return a.start_time < b.start_time;
-                });
-
-            std::cout << "[OVERLAP] Machine " << machineId << " operations:" << std::endl;
-            for (size_t i = 0; i < ops.size(); ++i) {
-                const auto& op = ops[i];
-                std::cout << "[OVERLAP]   J" << op.job_id << "-" << op.stage
-                    << " [" << op.start_time << "-" << op.end_time << "]";
-
-                // 检查与下一个操作的重叠
-                if (i + 1 < ops.size()) {
-                    const auto& nextOp = ops[i + 1];
-                    if (op.end_time > nextOp.start_time) {
-                        std::cout << " ！！  OVERLAP with J" << nextOp.job_id << "-" << nextOp.stage
-                            << " [" << nextOp.start_time << "-" << nextOp.end_time << "]";
-                        hasOverlaps = true;
-                    }
-                }
-                std::cout << std::endl;
-            }
-        }
-#endif
-
-        if (!hasOverlaps) {
-            INFO("√ No time overlaps detected on any machine.");
-        }
-        else {
-            WARNING("！！  Time overlaps detected! This may cause visual issues.");
-        }
-    }
-
-private:
-    // 计算时间和机器的范围，并动态调整布局
-    void calculateRanges() {
-        if (operations.empty()) return;
-
-        minTime = maxTime = operations[0].start_time;
-        minMachine = maxMachine = operations[0].machine_id;
-
-        for (const auto& op : operations) {
-            minTime = std::min(minTime, op.start_time);
-            maxTime = std::max(maxTime, op.end_time);
-            minMachine = std::min(minMachine, op.machine_id);
-            maxMachine = std::max(maxMachine, op.machine_id);
-        }
-
-        // 根据机器数量动态调整布局参数
-        int machineCount = maxMachine - minMachine + 1;
-        float availableHeight = window.getSize().y - topMargin - bottomMargin;
-
-        RANGE_DEBUG("Machine count: " << machineCount << ", Available height: " << availableHeight);
-
-        if (machineCount <= 3) {
-            // 很少机器时：大条形，宽间距
-            barHeight = std::min(80.0f, availableHeight / machineCount * 0.7f);
-            barSpacing = std::min(20.0f, availableHeight / machineCount * 0.3f);
-            RANGE_DEBUG("Layout: Very few machines - luxury display");
-        }
-        else if (machineCount <= 6) {
-            // 少量机器时：中等条形，适中间距
-            barHeight = std::min(60.0f, availableHeight / machineCount * 0.75f);
-            barSpacing = std::min(15.0f, availableHeight / machineCount * 0.25f);
-            RANGE_DEBUG("Layout: Few machines - comfortable display");
-        }
-        else if (machineCount <= 10) {
-            // 中等数量机器：平衡显示
-            barHeight = std::min(45.0f, availableHeight / machineCount * 0.8f);
-            barSpacing = std::min(8.0f, availableHeight / machineCount * 0.2f);
-            RANGE_DEBUG("Layout: Medium machines - balanced display");
-        }
-        else if (machineCount <= 15) {
-            // 较多机器：紧凑显示
-            barHeight = std::min(30.0f, availableHeight / machineCount * 0.85f);
-            barSpacing = std::min(5.0f, availableHeight / machineCount * 0.15f);
-            RANGE_DEBUG("Layout: Many machines - compact display");
-        }
-        else {
-            // 大量机器：超紧凑显示，按可用空间平均分配
-            float totalSpace = availableHeight / machineCount;
-            barHeight = std::max(12.0f, totalSpace * 0.9f);  // 最小12像素高度
-            barSpacing = std::max(1.0f, totalSpace * 0.1f);  // 最小1像素间距
-            RANGE_DEBUG("Layout: Very many machines - ultra-compact display");
-        }
-
-        // 确保布局参数合理
-        barHeight = std::max(10.0f, std::min(100.0f, barHeight));
-        barSpacing = std::max(1.0f, std::min(30.0f, barSpacing));
-
-        // 计算时间缩放比例 - 考虑缩放级别
-        float chartWidth = (window.getSize().x - leftMargin - rightMargin) * zoomLevel;
-        if (maxTime > minTime) {
-            timeScale = chartWidth / static_cast<float>(maxTime - minTime);
-        }
-        else {
-            timeScale = 1.0f;
-        }
-
-        RANGE_DEBUG("=== Range Calculation Results ===");
-        RANGE_DEBUG("Time: " << minTime << " - " << maxTime << " (span: " << (maxTime - minTime) << ")");
-        RANGE_DEBUG("Machines: " << minMachine << " - " << maxMachine << " (count: " << machineCount << ")");
-        RANGE_DEBUG("Layout: barHeight=" << barHeight << ", barSpacing=" << barSpacing);
-        RANGE_DEBUG("Chart width: " << chartWidth << ", Time scale: " << timeScale);
-
-        // 验证总高度是否适合窗口
-        float totalRequiredHeight = machineCount * barHeight + (machineCount - 1) * barSpacing;
-        if (totalRequiredHeight > availableHeight) {
-            WARNING("Total required height (" << totalRequiredHeight
-                << ") exceeds available height (" << availableHeight << ")");
-        }
-        else {
-            RANGE_DEBUG("Layout fits well: used " << totalRequiredHeight
-                << "/" << availableHeight << " = "
-                << (totalRequiredHeight / availableHeight * 100) << "%");
-        }
-    }
-
-    // 为每个job_id生成颜色
-    void generateJobColors() {
-        jobColors.clear();
-        std::vector<int> uniqueJobs;
-
-        for (const auto& op : operations) {
-            if (std::find(uniqueJobs.begin(), uniqueJobs.end(), op.job_id) == uniqueJobs.end()) {
-                uniqueJobs.push_back(op.job_id);
-            }
-        }
-
-        // 生成不同的颜色
-        for (size_t i = 0; i < uniqueJobs.size(); ++i) {
-            float hue = (360.0f * i) / uniqueJobs.size();
-            sf::Color color = hsvToRgb(hue, 0.7f, 0.9f);
-            jobColors[uniqueJobs[i]] = color;
-        }
-    }
-
-    // HSV转RGB
-    sf::Color hsvToRgb(float h, float s, float v) {
-        float c = v * s;
-        float x = c * (1 - std::abs(std::fmod(h / 60.0f, 2) - 1));
-        float m = v - c;
-
-        float r, g, b;
-        if (h >= 0 && h < 60) {
-            r = c; g = x; b = 0;
-        }
-        else if (h >= 60 && h < 120) {
-            r = x; g = c; b = 0;
-        }
-        else if (h >= 120 && h < 180) {
-            r = 0; g = c; b = x;
-        }
-        else if (h >= 180 && h < 240) {
-            r = 0; g = x; b = c;
-        }
-        else if (h >= 240 && h < 300) {
-            r = x; g = 0; b = c;
-        }
-        else {
-            r = c; g = 0; b = x;
-        }
-
-        return sf::Color(
-            static_cast<sf::Uint8>((r + m) * 255),
-            static_cast<sf::Uint8>((g + m) * 255),
-            static_cast<sf::Uint8>((b + m) * 255)
-        );
-    }
-
-    // 获取机器在屏幕上的Y坐标
-    float getMachineY(int machineId) {
-        int machineIndex = machineId - minMachine;
-        return topMargin + offsetY + machineIndex * (barHeight + barSpacing);
-    }
-
-    // 获取时间在屏幕上的X坐标
-    float getTimeX(int time) {
-        return leftMargin + offsetX + (time - minTime) * timeScale;
-    }
-
-    // 添加缩放和平移控制
-    void handleZoom(float delta) {
-        float oldZoom = zoomLevel;
-        zoomLevel = std::max(0.1f, std::min(5.0f, zoomLevel + delta));
-
-        if (zoomLevel != oldZoom) {
-            calculateRanges();
-            std::cout << "Zoom level: " << zoomLevel << std::endl;
-        }
-    }
-
-    void handlePan(float deltaX, float deltaY) {
-        offsetX += deltaX;
-        offsetY += deltaY;
-
-        // 限制平移范围
-        float maxOffsetX = std::max(0.0f, (maxTime - minTime) * timeScale - (window.getSize().x - leftMargin - rightMargin));
-        float maxOffsetY = std::max(0.0f, (maxMachine - minMachine + 1) * (barHeight + barSpacing) - (window.getSize().y - topMargin - bottomMargin));
-
-        offsetX = std::max(-maxOffsetX, std::min(0.0f, offsetX));
-        offsetY = std::max(-maxOffsetY, std::min(0.0f, offsetY));
-    }
-
-public:
-    // 绘制甘特图
-    void draw() {
-        window.clear(sf::Color::White);
-
-        drawAxes();
-        drawOperations();
-        drawLabels();
-
-        window.display();
-    }
-
-    // 重置调试标志
-    void resetDebugFlag() {
-        debugOutputShown = false;
-    }
-
-    // 处理鼠标滚轮缩放
-    void handleMouseWheel(float delta) {
-        handleZoom(delta * 0.1f);
-    }
-
-    // 处理键盘平移
-    void handleKeyboard() {
-        float panSpeed = 20.0f;
-
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left) || sf::Keyboard::isKeyPressed(sf::Keyboard::A)) {
-            handlePan(panSpeed, 0);
-        }
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right) || sf::Keyboard::isKeyPressed(sf::Keyboard::D)) {
-            handlePan(-panSpeed, 0);
-        }
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up) || sf::Keyboard::isKeyPressed(sf::Keyboard::W)) {
-            handlePan(0, panSpeed);
-        }
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down) || sf::Keyboard::isKeyPressed(sf::Keyboard::S)) {
-            handlePan(0, -panSpeed);
-        }
-    }
-
-    // 重置视图
-    void resetView() {
-        zoomLevel = 1.0f;
-        offsetX = 0.0f;
-        offsetY = 0.0f;
-        calculateRanges();
-        std::cout << "View reset to default" << std::endl;
-    }
-
-private:
-    // 绘制坐标轴
-    void drawAxes() {
-        // 绘制Y轴（机器轴）
-        sf::RectangleShape yAxis(sf::Vector2f(2, window.getSize().y - topMargin - bottomMargin));
-        yAxis.setPosition(leftMargin - 1, topMargin);
-        yAxis.setFillColor(sf::Color::Black);
-        window.draw(yAxis);
-
-        // 绘制X轴（时间轴）
-        sf::RectangleShape xAxis(sf::Vector2f(window.getSize().x - leftMargin - rightMargin, 2));
-        xAxis.setPosition(leftMargin, window.getSize().y - bottomMargin);
-        xAxis.setFillColor(sf::Color::Black);
-        window.draw(xAxis);
-    }
-
-    // 绘制操作块
-    void drawOperations() {
-        bool shouldShowDebug = !debugOutputShown;
-
-        if (shouldShowDebug) {
-            DRAW_DEBUG("=== Drawing Operations ===");
-            DRAW_DEBUG("Zoom: " << zoomLevel << ", Offset: (" << offsetX << ", " << offsetY << ")");
-            DRAW_DEBUG("Visible operations (showing first 5):");
-        }
-
-        int drawnCount = 0;
-        int visibleCount = 0;
-
-#ifdef ENABLE_PERFORMANCE_DEBUG
-        auto startTime = std::chrono::high_resolution_clock::now();
-#endif
-
-        for (size_t i = 0; i < operations.size(); ++i) {
-            const auto& op = operations[i];
-            float x = getTimeX(op.start_time);
-            float y = getMachineY(op.machine_id);
-            float width = (op.end_time - op.start_time) * timeScale;
-
-            // 检查是否在可见区域内
-            if (x + width < 0 || x > window.getSize().x ||
-                y + barHeight < 0 || y > window.getSize().y) {
-                continue; // 跳过不可见的操作
-            }
-
-            visibleCount++;
-
-#ifdef ENABLE_DRAWING_DEBUG
-            if (shouldShowDebug && drawnCount < 5) {
-                std::cout << "[DRAW] J" << op.job_id << "-" << op.stage << " | "
-                    << "M" << op.machine_id << " | "
-                    << "(" << std::setw(6) << std::fixed << std::setprecision(1) << x << ","
-                    << std::setw(6) << std::fixed << std::setprecision(1) << y << ") | "
-                    << "size(" << std::setw(6) << std::fixed << std::setprecision(1) << width << ","
-                    << std::setw(4) << barHeight << ") | "
-                    << "[" << op.start_time << "-" << op.end_time << "]" << std::endl;
-            }
-#endif
-
-            // 绘制操作矩形
-            sf::RectangleShape rect(sf::Vector2f(std::max(1.0f, width), barHeight));
-            rect.setPosition(x, y);
-            rect.setFillColor(jobColors[op.job_id]);
-
-            // 设置边框
-            if (op.is_critical) {
-                rect.setOutlineThickness(2);
-                rect.setOutlineColor(sf::Color::Red);
-            }
-            else {
-                rect.setOutlineThickness(1);
-                rect.setOutlineColor(sf::Color::Black);
-            }
-
-            window.draw(rect);
-            drawnCount++;
-
-            // 绘制标签文本 - 只有当矩形足够大时
-            if (width > 30 && barHeight > 15) {
-                std::string label = "J" + std::to_string(op.job_id) + "-" + std::to_string(op.stage);
-
-                // 根据矩形大小选择字体大小
-                int fontSize = 10;
-                if (width > 80) fontSize = 12;
-                if (width > 120) fontSize = 14;
-
-                sf::Text text(label, font, fontSize);
-                text.setFillColor(sf::Color::Black);
-
-                // 计算文本居中位置
-                sf::FloatRect textBounds = text.getLocalBounds();
-                if (textBounds.width < width - 4) {
-                    float textX = x + (width - textBounds.width) / 2;
-                    float textY = y + (barHeight - textBounds.height) / 2 - 2;
-                    text.setPosition(textX, textY);
-                    window.draw(text);
-                }
-            }
-        }
-
-        if (shouldShowDebug) {
-            PERF_DEBUG("Visible operations: " << visibleCount << "/" << operations.size());
-            PERF_DEBUG("Actually drawn: " << drawnCount);
-            debugOutputShown = true;
-
-#ifdef ENABLE_PERFORMANCE_DEBUG
-            auto endTime = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
-            std::cout << "[PERF] Drawing time: " << duration.count() << " microseconds" << std::endl;
-#endif
-        }
-    }
-
-    // 绘制标签
-    void drawLabels() {
-        // 绘制机器标签
-        for (int machine = minMachine; machine <= maxMachine; ++machine) {
-            float y = getMachineY(machine);
-
-            // 只绘制可见的机器标签
-            if (y < -20 || y > window.getSize().y + 20) continue;
-
-            std::string label = "M" + std::to_string(machine);
-            sf::Text text(label, font, 10);
-            text.setFillColor(sf::Color::Black);
-
-            text.setPosition(5, y + barHeight / 2 - 6);
-            window.draw(text);
-        }
-
-        // 绘制时间标签 - 动态调整步长
-        int totalTimeSpan = maxTime - minTime;
-        int labelCount = (window.getSize().x - leftMargin - rightMargin) / 80; // 每80像素一个标签
-        int timeStep = std::max(1, totalTimeSpan / labelCount);
-
-        // 确保步长是合理的数值
-        if (timeStep < 50) timeStep = 50;
-        else if (timeStep < 100) timeStep = 100;
-        else if (timeStep < 200) timeStep = 200;
-        else if (timeStep < 500) timeStep = 500;
-        else timeStep = ((timeStep + 499) / 500) * 500; // 向上取整到500的倍数
-
-        for (int time = minTime; time <= maxTime; time += timeStep) {
-            float x = getTimeX(time);
-
-            // 只绘制可见的时间标签
-            if (x < leftMargin - 50 || x > window.getSize().x) continue;
-
-            std::string label = std::to_string(time);
-            sf::Text text(label, font, 10);
-            text.setFillColor(sf::Color::Black);
-
-            sf::FloatRect textBounds = text.getLocalBounds();
-            text.setPosition(x - textBounds.width / 2, window.getSize().y - bottomMargin + 5);
-            window.draw(text);
-
-            // 绘制时间刻度线
-            sf::RectangleShape tick(sf::Vector2f(1, 5));
-            tick.setPosition(x, window.getSize().y - bottomMargin);
-            tick.setFillColor(sf::Color::Black);
-            window.draw(tick);
-        }
-
-        // 绘制轴标题
-        sf::Text yAxisTitle("Machine", font, 12);
-        yAxisTitle.setFillColor(sf::Color::Black);
-        yAxisTitle.setPosition(5, 5);
-        window.draw(yAxisTitle);
-
-        sf::Text xAxisTitle("Time", font, 12);
-        xAxisTitle.setFillColor(sf::Color::Black);
-        xAxisTitle.setPosition(window.getSize().x / 2 - 20, window.getSize().y - 20);
-        window.draw(xAxisTitle);
-
-        // 绘制缩放信息
-        std::string zoomInfo = "Zoom: " + std::to_string(static_cast<int>(zoomLevel * 100)) + "%";
-        sf::Text zoomText(zoomInfo, font, 10);
-        zoomText.setFillColor(sf::Color::Blue);
-        zoomText.setPosition(window.getSize().x - 100, 5);
-        window.draw(zoomText);
-    }
-};
-
-// CSV读取函数
-std::vector<MyOp> loadOperationsFromCSV(const std::string& filename) {
-    std::vector<MyOp> operations;
-    std::ifstream file(filename);
-
-    if (!file.is_open()) {
-        ERROR("Could not open file " << filename);
-        return operations;
-    }
-
-    std::string line;
-    bool isFirstLine = true;
-    int lineNumber = 0;
-
-    CSV_DEBUG("=== CSV Reading Started ===");
-    CSV_DEBUG("Reading from file: " << filename);
-
-    while (std::getline(file, line)) {
-        lineNumber++;
-
-        // 去除行末的回车符
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-
-        // 跳过标题行，但要检查格式
-        if (isFirstLine) {
-            CSV_DEBUG("Header line: " << line);
-
-            // 检查是否是预期的格式
-            if (line.find("ID") != std::string::npos && line.find("Job") != std::string::npos) {
-                CSV_DEBUG("√ Detected your CSV format (ID,Job,Operation,Machine,StartTime,EndTime,IsCritical)");
-            }
-            else if (line.find("job_id") != std::string::npos) {
-                CSV_DEBUG("√ Detected standard format (job_id,stage,machine_id,...)");
-            }
-            else {
-                WARNING("Unknown header format, will attempt to parse...");
-            }
-
-            isFirstLine = false;
-            continue;
-        }
-
-        // 跳过空行
-        if (line.empty()) {
-            continue;
-        }
-
-        CSV_DEBUG_DETAILED("Line " << lineNumber << ": " << line);
-
-        std::stringstream ss(line);
-        std::string cell;
-        std::vector<std::string> row;
-
-        // 解析CSV行
-        while (std::getline(ss, cell, ',')) {
-            // 去除前后空格和引号
-            cell.erase(0, cell.find_first_not_of(" \t\""));
-            cell.erase(cell.find_last_not_of(" \t\"") + 1);
-            row.push_back(cell);
-        }
-
-#ifdef ENABLE_CSV_DEBUG
-        if (lineNumber <= 6) { // 只显示前几行的详细信息
-            std::cout << "[CSV_DETAIL] Parsed " << row.size() << " cells: ";
-            for (size_t i = 0; i < row.size(); ++i) {
-                std::cout << "[" << i << "]=\"" << row[i] << "\" ";
-            }
-            std::cout << std::endl;
-        }
-#endif
-
-        // 检查列数
-        if (row.size() < 6) {
-            if (lineNumber <= 10) {
-                ERROR("Line " << lineNumber << " has insufficient columns (" << row.size() << " < 6)");
-            }
-            continue;
-        }
-
-        // 解析数据
-        MyOp op;
-        try {
-            // CSV格式：ID,Job,Operation,Machine,StartTime,EndTime,IsCritical
-            int id = std::stoi(row[0]);           // ID (用作索引)
-            op.job_id = std::stoi(row[1]);        // Job -> job_id
-            op.stage = std::stoi(row[2]);         // Operation -> stage  
-            op.machine_id = std::stoi(row[3]);    // Machine -> machine_id
-            op.start_time = std::stoi(row[4]);    // StartTime -> start_time
-            op.end_time = std::stoi(row[5]);      // EndTime -> end_time
-            op.is_critical = (std::stoi(row[6]) == 1);  // IsCritical -> is_critical (1表示true)
-            op.some_other_field = static_cast<double>(id);  // 使用ID作为other字段
-
-            operations.push_back(op);
-
-            CSV_DEBUG_DETAILED("√ Operation added: Job=" << op.job_id
-                << ", Stage=" << op.stage
-                << ", Machine=" << op.machine_id
-                << ", Time=[" << op.start_time << "-" << op.end_time << "]"
-                << ", Critical=" << (op.is_critical ? "true" : "false")
-                << ", ID=" << id);
-
-        }
-        catch (const std::exception& e) {
-            if (lineNumber <= 10) {
-                ERROR("Error parsing line " << lineNumber << ": " << line);
-                ERROR("Exception: " << e.what());
-            }
-        }
-    }
-
-    file.close();
-
-    INFO("=== CSV Reading Summary ===");
-    INFO("Total lines processed: " << lineNumber);
-    INFO("Valid operations loaded: " << operations.size());
+/**
+ * 甘特图库简单使用示例
+ * 演示两个核心接口：
+ * 1. init() - 初始化空状态接口
+ * 2. update() - 清空前一个显示，绘制当前显示的接口
+ */
+
+ // 创建一些示例调度数据
+std::vector<qm::Operation> createSampleSchedule1() {
+    std::vector<qm::Operation> operations;
+
+    // 示例调度方案1：3个作业，简单安排
+    qm::Operation op;
+
+    // 作业0
+    op.job_id = 0; op.stage = 0; op.machine_id = 0; op.start_time = 0; op.end_time = 25; op.is_critical = true;
+    operations.push_back(op);
+    op.job_id = 0; op.stage = 1; op.machine_id = 1; op.start_time = 30; op.end_time = 55; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 0; op.stage = 2; op.machine_id = 2; op.start_time = 60; op.end_time = 85; op.is_critical = true;
+    operations.push_back(op);
+
+    // 作业1  
+    op.job_id = 1; op.stage = 0; op.machine_id = 1; op.start_time = 10; op.end_time = 35; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 1; op.stage = 1; op.machine_id = 2; op.start_time = 40; op.end_time = 65; op.is_critical = true;
+    operations.push_back(op);
+    op.job_id = 1; op.stage = 2; op.machine_id = 0; op.start_time = 90; op.end_time = 115; op.is_critical = false;
+    operations.push_back(op);
+
+    // 作业2
+    op.job_id = 2; op.stage = 0; op.machine_id = 2; op.start_time = 20; op.end_time = 45; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 2; op.stage = 1; op.machine_id = 0; op.start_time = 120; op.end_time = 145; op.is_critical = true;
+    operations.push_back(op);
+    op.job_id = 2; op.stage = 2; op.machine_id = 1; op.start_time = 150; op.end_time = 175; op.is_critical = false;
+    operations.push_back(op);
 
     return operations;
 }
 
-// 检查操作重叠的独立函数
-void checkOperationsOverlap(const std::vector<MyOp>& operations) {
-    OVERLAP_DEBUG("=== Overlap Detection ===");
+std::vector<qm::Operation> createSampleSchedule2() {
+    std::vector<qm::Operation> operations;
 
-    // 按机器分组
-    std::map<int, std::vector<MyOp>> machineOps;
-    for (const auto& op : operations) {
-        machineOps[op.machine_id].push_back(op);
-    }
+    // 示例调度方案2：4个作业，更复杂的安排
+    qm::Operation op;
 
-    bool hasOverlaps = false;
-    for (auto& pair : machineOps) {
-        int machineId = pair.first;
-        auto& ops = pair.second;
+    // 作业0
+    op.job_id = 0; op.stage = 0; op.machine_id = 2; op.start_time = 0; op.end_time = 20; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 0; op.stage = 1; op.machine_id = 0; op.start_time = 25; op.end_time = 50; op.is_critical = true;
+    operations.push_back(op);
 
-        // 按开始时间排序
-        std::sort(ops.begin(), ops.end(), [](const MyOp& a, const MyOp& b) {
-            return a.start_time < b.start_time;
-            });
+    // 作业1
+    op.job_id = 1; op.stage = 0; op.machine_id = 1; op.start_time = 5; op.end_time = 30; op.is_critical = true;
+    operations.push_back(op);
+    op.job_id = 1; op.stage = 1; op.machine_id = 3; op.start_time = 35; op.end_time = 60; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 1; op.stage = 2; op.machine_id = 2; op.start_time = 65; op.end_time = 90; op.is_critical = true;
+    operations.push_back(op);
 
-        OVERLAP_DEBUG("Machine " << machineId << " (" << ops.size() << " operations):");
+    // 作业2
+    op.job_id = 2; op.stage = 0; op.machine_id = 0; op.start_time = 55; op.end_time = 80; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 2; op.stage = 1; op.machine_id = 1; op.start_time = 95; op.end_time = 120; op.is_critical = true;
+    operations.push_back(op);
 
-#ifdef ENABLE_DATA_ANALYSIS
-        for (size_t i = 0; i < ops.size(); ++i) {
-            const auto& op = ops[i];
-            std::cout << "[OVERLAP]   J" << op.job_id << "-" << op.stage
-                << " [" << op.start_time << "-" << op.end_time << "]";
+    // 作业3
+    op.job_id = 3; op.stage = 0; op.machine_id = 3; op.start_time = 10; op.end_time = 35; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 3; op.stage = 1; op.machine_id = 2; op.start_time = 95; op.end_time = 120; op.is_critical = false;
+    operations.push_back(op);
+    op.job_id = 3; op.stage = 2; op.machine_id = 1; op.start_time = 125; op.end_time = 150; op.is_critical = true;
+    operations.push_back(op);
 
-            // 检查与下一个操作的重叠
-            if (i + 1 < ops.size()) {
-                const auto& nextOp = ops[i + 1];
-                if (op.end_time > nextOp.start_time) {
-                    std::cout << " ！！  OVERLAP with J" << nextOp.job_id << "-" << nextOp.stage
-                        << " [" << nextOp.start_time << "-" << nextOp.end_time << "]"
-                        << " (overlap time: " << (op.end_time - nextOp.start_time) << ")";
-                    hasOverlaps = true;
-                }
-            }
-            std::cout << std::endl;
-        }
-#endif
-    }
-
-    if (!hasOverlaps) {
-        INFO("√ No time overlaps detected on any machine.");
-    }
-    else {
-        WARNING("！！  WARNING: Time overlaps detected! This will cause visual overlapping in the Gantt chart.");
-    }
+    return operations;
 }
 
-// 打印vector中的操作数据
-void printOperationsVector(const std::vector<MyOp>& operations) {
-    DATA_DEBUG("=== Vector Content Analysis ===");
-    DATA_DEBUG("Vector size: " << operations.size());
+std::vector<qm::Operation> createSampleSchedule3() {
+    std::vector<qm::Operation> operations;
 
-#ifdef ENABLE_DATA_ANALYSIS
-    std::cout << "[DATA] Format: [Index] Job-Stage | Machine | Time | Critical | Other" << std::endl;
-    std::cout << "[DATA] ---------------------------------------------------------------" << std::endl;
+    // 示例调度方案3：更多机器，密集调度
+    qm::Operation op;
 
-    for (size_t i = 0; i < operations.size(); ++i) {
-        const auto& op = operations[i];
-        std::cout << "[DATA] [" << std::setw(2) << i << "] "
-            << "J" << op.job_id << "-" << op.stage << " | "
-            << "M" << op.machine_id << " | "
-            << "[" << std::setw(2) << op.start_time << "-" << std::setw(2) << op.end_time << "] | "
-            << (op.is_critical ? "CRITICAL" : "normal  ") << " | "
-            << op.some_other_field << std::endl;
-    }
-#endif
-
-    if (operations.empty()) {
-        WARNING("Vector is empty");
-        return;
+    for (int job = 0; job < 5; ++job) {
+        for (int stage = 0; stage < 3; ++stage) {
+            op.job_id = job;
+            op.stage = stage;
+            op.machine_id = (job + stage) % 6;  // 使用6台机器
+            op.start_time = job * 30 + stage * 20;
+            op.end_time = op.start_time + 15 + (job * 5);
+            op.is_critical = (job == 2 && stage == 1) || (job == 4 && stage == 0);
+            operations.push_back(op);
+        }
     }
 
-    // 分析时间和机器范围
-    int minTime = operations[0].start_time;
-    int maxTime = operations[0].end_time;
-    int minMachine = operations[0].machine_id;
-    int maxMachine = operations[0].machine_id;
+    return operations;
+}
 
-    for (const auto& op : operations) {
-        minTime = std::min(minTime, op.start_time);
-        maxTime = std::max(maxTime, op.end_time);
-        minMachine = std::min(minMachine, op.machine_id);
-        maxMachine = std::max(maxMachine, op.machine_id);
+// 创建示例CSV文件
+void createSampleCSV() {
+    std::ofstream file("output.csv");
+    if (file.is_open()) {
+        file << "ID,Job,Operation,Machine,StartTime,EndTime,IsCritical\n";
+        file << "1,0,0,3,299,323,1\n";
+        file << "2,0,1,7,780,843,0\n";
+        file << "3,0,2,5,843,866,1\n";
+        file << "4,1,0,2,150,175,0\n";
+        file << "5,1,1,4,400,425,1\n";
+        file << "6,1,2,6,600,625,0\n";
+        file << "7,2,0,1,50,75,0\n";
+        file << "8,2,1,3,323,348,1\n";
+        file << "9,2,2,8,700,725,0\n";
+        file << "10,3,0,0,0,25,1\n";
+        file << "11,3,1,5,866,891,0\n";
+        file << "12,3,2,9,950,975,1\n";
+        file.close();
+        std::cout << "[INFO] Sample CSV file 'output.csv' created" << std::endl;
     }
-
-    DATA_DEBUG("=== Data Range Analysis ===");
-    DATA_DEBUG("Time range: " << minTime << " - " << maxTime << " (duration: " << (maxTime - minTime) << ")");
-    DATA_DEBUG("Machine range: " << minMachine << " - " << maxMachine << " (count: " << (maxMachine - minMachine + 1) << ")");
-
-    // 检查重叠
-    checkOperationsOverlap(operations);
 }
 
 int main() {
-    // 检查CSV文件是否存在
-    std::string csvFilename = "result.csv";
-    std::ifstream testFile(csvFilename);
-    if (!testFile.good()) {
-        ERROR("CSV file '" << csvFilename << "' not found!");
-        std::cerr << "Please create a CSV file with the following format:" << std::endl;
-        std::cerr << "ID,Job,Operation,Machine,StartTime,EndTime,IsCritical" << std::endl;
-        std::cerr << "1,0,0,3,299,323,1" << std::endl;
-        std::cerr << "2,0,1,7,780,843,0" << std::endl;
-        std::cerr << "..." << std::endl;
+    std::cout << "=== 甘特图库简单使用示例 ===" << std::endl;
+    std::cout << "演示两个核心接口的使用方法" << std::endl;
+
+    // 创建示例CSV文件（如果不存在）
+    std::ifstream csvCheck("output.csv");
+    if (!csvCheck.good()) {
+        createSampleCSV();
+    }
+    csvCheck.close();
+
+    // 设置SFML的错误处理
+    sf::err().rdbuf(nullptr); // 禁用SFML错误输出
+
+    // 使用配置文件创建SFML窗口
+    sf::RenderWindow window;
+    try {
+        // 获取配置的上下文设置
+        sf::ContextSettings settings = getWindowContextSettings();
+
+        // 创建窗口
+        window.create(
+            sf::VideoMode(GanttConfig::WindowConfig::DEFAULT_WINDOW_WIDTH,
+                GanttConfig::WindowConfig::DEFAULT_WINDOW_HEIGHT),
+            "Gantt Chart - Configured Display",
+            sf::Style::Default,
+            settings
+        );
+
+        if (!window.isOpen()) {
+            std::cerr << "Failed to create SFML window!" << std::endl;
+            return -1;
+        }
+
+        // 应用配置设置
+        configureWindow(window);
+
+        std::cout << "✓ Window created with configuration: "
+            << window.getSize().x << "x" << window.getSize().y
+            << " @" << GanttConfig::WindowConfig::FRAME_RATE_LIMIT << "fps" << std::endl;
+
+    }
+    catch (const std::exception& e) {
+        std::cerr << "SFML window creation failed: " << e.what() << std::endl;
         return -1;
     }
-    testFile.close();
-
-    // 读取CSV数据到vector
-    std::vector<MyOp> testOps = loadOperationsFromCSV(csvFilename);
-
-    if (testOps.empty()) {
-        ERROR("No valid operations loaded from CSV file!");
-        return -1;
-    }
-
-    // 打印读取到的数据进行验证
-    printOperationsVector(testOps);
-
-    // 创建更大的SFML窗口来容纳大数据集
-    sf::RenderWindow window(sf::VideoMode(1600, 900), "Gantt Chart Viewer - Large Dataset");
-    window.setFramerateLimit(60);
 
     // 创建甘特图对象
     GanttChart gantt(window);
 
-    // 设置数据到甘特图
-    gantt.setData(testOps);
+    // === 接口1：初始化空状态 ===
+    std::cout << "\n步骤1：调用 init() 初始化空状态" << std::endl;
+    if (!gantt.init()) {
+        std::cerr << "初始化失败!" << std::endl;
+        return -1;
+    }
+    std::cout << "✓ 甘特图初始化成功" << std::endl;
 
-    INFO("=== Gantt Chart Window Opened ===");
-    INFO("Controls:");
-    INFO("- ESC: Exit");
-    INFO("- Mouse Wheel: Zoom in/out");
-    INFO("- Arrow Keys or WASD: Pan view");
-    INFO("- SPACE: Reset view");
-    INFO("- D: Show debug info again");
-    INFO("- R: Reset debug output flag");
+    // 准备示例数据
+    std::vector<std::vector<qm::Operation>> schedules = {
+        createSampleSchedule1(),
+        createSampleSchedule2(),
+        createSampleSchedule3()
+    };
 
-    // 主循环
+    // 如果有CSV文件，也加入到示例中
+    auto csvOps = loadOperationsFromCSV("output.csv");
+    if (!csvOps.empty()) {
+        schedules.push_back(csvOps);
+    }
+
+    std::cout << "\n步骤2：使用 update() 接口展示不同的调度方案" << std::endl;
+    std::cout << "准备了 " << schedules.size() << " 个示例调度方案" << std::endl;
+    std::cout << "\n控制说明：" << std::endl;
+    std::cout << "  鼠标滚轮 - 缩放" << std::endl;
+    std::cout << "  方向键/WASD - 平移" << std::endl;
+    std::cout << "  空格键 - 重置视图" << std::endl;
+    std::cout << "  ESC - 退出" << std::endl;
+    std::cout << "\n程序将自动切换显示不同的调度方案..." << std::endl;
+
+    // 主循环 - 演示update接口的使用
+    sf::Clock frameClock;
+    sf::Clock switchClock;
+    int currentSchedule = 0;
+    bool hasUpdated = false;
+
     while (window.isOpen()) {
+        // 控制帧率（使用配置参数）
+        if (frameClock.getElapsedTime().asMilliseconds() < GanttConfig::WindowConfig::TARGET_FRAME_TIME_MS) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        frameClock.restart();
+
+        // 每3秒切换一次调度方案，演示update接口
+        if (switchClock.getElapsedTime().asSeconds() >= 3.0f) {
+            if (!schedules.empty()) {
+                // === 接口2：清空前一个显示，绘制当前显示 ===
+                std::cout << "\n调用 update() 接口，显示调度方案 " << (currentSchedule + 1)
+                    << " (共" << schedules[currentSchedule].size() << "个操作)" << std::endl;
+
+                bool success = gantt.update(schedules[currentSchedule]);
+                if (success) {
+                    std::cout << "✓ 更新成功，甘特图已刷新" << std::endl;
+
+                    // 显示统计信息
+                    std::cout << "  操作数量: " << gantt.getOperationCount() << std::endl;
+                    std::cout << "  是否有重叠: " << (gantt.hasOverlaps() ? "是" : "否") << std::endl;
+
+                    int minTime, maxTime, minMachine, maxMachine;
+                    gantt.getTimeRange(minTime, maxTime);
+                    gantt.getMachineRange(minMachine, maxMachine);
+                    std::cout << "  时间范围: " << minTime << " - " << maxTime << std::endl;
+                    std::cout << "  机器范围: " << minMachine << " - " << maxMachine << std::endl;
+                }
+                else {
+                    std::cout << "✗ 更新失败" << std::endl;
+                }
+
+                currentSchedule = (currentSchedule + 1) % schedules.size();
+                hasUpdated = true;
+            }
+
+            switchClock.restart();
+        }
+
+        // 处理事件
         sf::Event event;
         while (window.pollEvent(event)) {
             if (event.type == sf::Event::Closed) {
                 window.close();
+                break;
             }
 
             if (event.type == sf::Event::KeyPressed) {
                 if (event.key.code == sf::Keyboard::Escape) {
                     window.close();
-                }
-
-                // 重置视图
-                if (event.key.code == sf::Keyboard::Space) {
-                    gantt.resetView();
-                }
-
-                // 重新显示调试信息
-                if (event.key.code == sf::Keyboard::D) {
-                    INFO("=== Manual Debug Output Requested ===");
-                    printOperationsVector(testOps);
-                    gantt.printLoadedData();
-                }
-
-                // 重置调试输出标志
-                if (event.key.code == sf::Keyboard::R) {
-                    gantt.resetDebugFlag();
-                    INFO("Debug output flag reset. Next draw will show debug info.");
+                    break;
                 }
             }
 
-            // 处理鼠标滚轮缩放
-            if (event.type == sf::Event::MouseWheelScrolled) {
-                gantt.handleMouseWheel(event.mouseWheelScroll.delta);
+            // 将事件传递给甘特图处理
+            try {
+                gantt.handleEvent(event);
+            }
+            catch (const std::exception& e) {
+                std::cerr << "Error handling event: " << e.what() << std::endl;
             }
         }
 
-        // 处理持续按键（平移）
-        gantt.handleKeyboard();
+        if (!window.isOpen()) break;
 
-        // 绘制甘特图
-        gantt.draw();
+        // 处理持续按键
+        try {
+            gantt.handleKeyboard();
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Error handling keyboard: " << e.what() << std::endl;
+        }
+
+        // 绘制当前状态
+        try {
+            gantt.draw();
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Error during drawing: " << e.what() << std::endl;
+        }
     }
+
+    std::cout << "\n=== 示例程序结束 ===" << std::endl;
+    std::cout << "实际使用时，你只需要：" << std::endl;
+    std::cout << "1. 调用 gantt.init() 一次进行初始化" << std::endl;
+    std::cout << "2. 每当有新的调度结果时，调用 gantt.update(newData) 更新显示" << std::endl;
+    std::cout << "3. 在主循环中调用 gantt.draw() 进行绘制" << std::endl;
+    std::cout << "4. 可以修改 GanttConfig.h 文件来调整显示参数" << std::endl;
 
     return 0;
 }
+
+/**
+ * 实际使用示例：
+ *
+ * // 在你的调度程序中
+ * GanttChart gantt(window);
+ * gantt.init();  // 初始化一次
+ *
+ * while (调度算法运行) {
+ *     auto newSchedule = 你的调度算法();
+ *     gantt.update(newSchedule);  // 清空旧的，显示新的
+ *
+ *     // 主循环中
+ *     gantt.handleEvent(event);
+ *     gantt.handleKeyboard();
+ *     gantt.draw();  // 绘制当前状态
+ * }
+ */
